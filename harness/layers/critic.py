@@ -79,16 +79,55 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        observed = ctx.observed_text
+        valid_claims = []
+        contradiction_found = False
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text", "")
+            if not text:
+                continue
+
+            if text in observed:
+                valid_claims.append(claim)
+            elif " và " in text:
+                parts = text.split(" và ", 1)
+                if len(parts) == 2 and parts[0] in observed and parts[1] in observed:
+                    doc1, doc2 = None, None
+                    if getattr(ctx, "corpus", None) and hasattr(ctx.corpus, "docs"):
+                        for d in ctx.corpus.docs:
+                            if d.body in observed:
+                                if doc1 is None and parts[0] in d.body:
+                                    doc1 = d.doc_id
+                                if doc2 is None and parts[1] in d.body:
+                                    doc2 = d.doc_id
+                    d1 = doc1 or claim.get("doc_id", "")
+                    d2 = doc2 or claim.get("doc_id", "")
+                    valid_claims.append({"text": parts[0], "doc_id": d1})
+                    valid_claims.append({"text": parts[1], "doc_id": d2})
+                    contradiction_found = True
+
+        if not valid_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ tài liệu hoặc dữ liệu không có căn cứ xác thực."
+        else:
+            report["claims"] = valid_claims
+            if contradiction_found:
+                report["abstain"] = True
+            citations = []
+            for c in valid_claims:
+                did = c.get("doc_id")
+                if did and did not in citations:
+                    citations.append(did)
+            report["citations"] = sorted(citations)
+
+        return report
+
